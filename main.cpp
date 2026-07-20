@@ -4,102 +4,169 @@
 #include <set>
 #include <map>
 #include <vector>
-#include <tuple>
+#include <functional>
 #include <sys/stat.h>
-#include <unistd.h>
+#include <dirent.h>
+#include <cstring>
 
 using namespace std;
 
-const string DATA_FILE = "kvstore.dat";
-const string TEMP_FILE = "kvstore.tmp";
+const string DATA_DIR = "store";
+const int NUM_BUCKETS = 16; // Use 16 bucket files (well under 20 limit)
+
+// Simple hash function for bucket selection
+size_t get_bucket(const string& index) {
+    hash<string> hasher;
+    size_t h = hasher(index);
+    return h % NUM_BUCKETS;
+}
+
+// Get line prefix for an index in a bucket file
+string prefix(const string& index) {
+    return "[" + index + "]";
+}
 
 bool file_exists(const string& filename) {
     struct stat buffer;
     return (stat(filename.c_str(), &buffer) == 0);
 }
 
-// Read entries for a specific index from file
-set<int> read_index_values(const string& target_index) {
-    set<int> values;
-    if (!file_exists(DATA_FILE)) return values;
+void ensure_data_dir() {
+    mkdir(DATA_DIR.c_str(), 0755);
+}
+
+// Read all entries from a bucket file
+void read_bucket(int bucket, map<string, set<int>>& data) {
+    string filepath = DATA_DIR + "/" + to_string(bucket) + ".dat";
+    if (!file_exists(filepath)) return;
     
-    ifstream fin(DATA_FILE);
-    string index;
-    int value;
-    while (fin >> index >> value) {
-        if (index == target_index) {
-            values.insert(value);
+    ifstream fin(filepath);
+    string line;
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        // Parse: [index] value
+        if (line[0] == '[') {
+            size_t end_bracket = line.find(']');
+            if (end_bracket != string::npos) {
+                string index = line.substr(1, end_bracket - 1);
+                int value = stoi(line.substr(end_bracket + 1));
+                data[index].insert(value);
+            }
+        }
+    }
+    fin.close();
+}
+
+// Write all entries to a bucket file
+void write_bucket(int bucket, const map<string, set<int>>& data) {
+    string filepath = DATA_DIR + "/" + to_string(bucket) + ".dat";
+    ofstream fout(filepath);
+    for (auto& p : data) {
+        for (int v : p.second) {
+            fout << "[" << p.first << "]" << v << "\n";
+        }
+    }
+    fout.close();
+}
+
+// Read entries for a specific index from its bucket
+set<int> read_index_values(const string& index) {
+    set<int> values;
+    int bucket = get_bucket(index);
+    string filepath = DATA_DIR + "/" + to_string(bucket) + ".dat";
+    if (!file_exists(filepath)) return values;
+    
+    ifstream fin(filepath);
+    string line;
+    string target_prefix = prefix(index);
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        if (line.compare(0, target_prefix.size(), target_prefix) == 0) {
+            size_t end_bracket = line.find(']');
+            if (end_bracket != string::npos) {
+                int value = stoi(line.substr(end_bracket + 1));
+                values.insert(value);
+            }
         }
     }
     fin.close();
     return values;
 }
 
-// Write all entries, updating one index
-void write_with_update(const string& target_index, const set<int>& new_values) {
-    ifstream fin;
-    ofstream fout(TEMP_FILE);
+// Update a specific index in its bucket
+void update_index(const string& index, const set<int>& values) {
+    int bucket = get_bucket(index);
+    string filepath = DATA_DIR + "/" + to_string(bucket) + ".dat";
+    string temp_path = DATA_DIR + "/" + to_string(bucket) + ".tmp";
     
-    // First, write the updated index
-    for (int v : new_values) {
-        fout << target_index << " " << v << "\n";
+    ifstream fin;
+    ofstream fout(temp_path);
+    
+    // Write the updated values first
+    for (int v : values) {
+        fout << "[" << index << "]" << v << "\n";
     }
     
-    // Copy other entries
-    if (file_exists(DATA_FILE)) {
-        fin.open(DATA_FILE);
-        string index;
-        int value;
-        while (fin >> index >> value) {
-            if (index != target_index) {
-                fout << index << " " << value << "\n";
+    string target_prefix = prefix(index);
+    if (file_exists(filepath)) {
+        fin.open(filepath);
+        string line;
+        while (getline(fin, line)) {
+            if (line.empty()) continue;
+            // Copy entries not for this index
+            if (line.compare(0, target_prefix.size(), target_prefix) != 0) {
+                fout << line << "\n";
             }
         }
         fin.close();
     }
     
     fout.close();
-    
-    // Atomic replace
-    rename(TEMP_FILE.c_str(), DATA_FILE.c_str());
+    rename(temp_path.c_str(), filepath.c_str());
 }
 
 int main() {
     ios_base::sync_with_stdio(false);
     cin.tie(nullptr);
     
+    ensure_data_dir();
+    
     int n;
     cin >> n;
     
-    // Track which indices we've modified (to avoid re-reading)
-    map<string, set<int>> modified;
+    // Track which indices we've modified
+    map<int, map<string, set<int>>> modified_buckets;
     
     for (int i = 0; i < n; i++) {
         string cmd, index;
         cin >> cmd >> index;
+        int bucket = get_bucket(index);
         
         if (cmd == "insert") {
             int value;
             cin >> value;
             
-            // Get current values (from memory or file)
-            if (modified.find(index) == modified.end()) {
-                modified[index] = read_index_values(index);
+            // Lazy load if not already loaded
+            if (modified_buckets.find(bucket) == modified_buckets.end()) {
+                read_bucket(bucket, modified_buckets[bucket]);
             }
-            modified[index].insert(value);
+            modified_buckets[bucket][index].insert(value);
         } else if (cmd == "delete") {
             int value;
             cin >> value;
             
-            // Get current values (from memory or file)
-            if (modified.find(index) == modified.end()) {
-                modified[index] = read_index_values(index);
+            if (modified_buckets.find(bucket) == modified_buckets.end()) {
+                read_bucket(bucket, modified_buckets[bucket]);
             }
-            modified[index].erase(value);
+            modified_buckets[bucket][index].erase(value);
+            if (modified_buckets[bucket][index].empty()) {
+                modified_buckets[bucket].erase(index);
+            }
         } else if (cmd == "find") {
             set<int> values;
-            if (modified.find(index) != modified.end()) {
-                values = modified[index];
+            if (modified_buckets.find(bucket) != modified_buckets.end() &&
+                modified_buckets[bucket].find(index) != modified_buckets[bucket].end()) {
+                values = modified_buckets[bucket][index];
             } else {
                 values = read_index_values(index);
             }
@@ -118,38 +185,34 @@ int main() {
         }
     }
     
-    // Write all modified indices back
-    if (!modified.empty()) {
-        // We need to merge with existing data
-        // Build a complete view
-        map<string, set<int>> all_data;
+    // Write modified buckets back
+    for (auto& p : modified_buckets) {
+        int bucket = p.first;
+        map<string, set<int>> data = p.second;
         
-        // Read unmodified entries from file
-        if (file_exists(DATA_FILE)) {
-            ifstream fin(DATA_FILE);
-            string index;
-            int value;
-            while (fin >> index >> value) {
-                if (modified.find(index) == modified.end()) {
-                    all_data[index].insert(value);
+        // Merge with non-modified entries from same bucket
+        string filepath = DATA_DIR + "/" + to_string(bucket) + ".dat";
+        if (file_exists(filepath)) {
+            ifstream fin(filepath);
+            string line;
+            while (getline(fin, line)) {
+                if (line.empty()) continue;
+                if (line[0] == '[') {
+                    size_t end_bracket = line.find(']');
+                    if (end_bracket != string::npos) {
+                        string idx = line.substr(1, end_bracket - 1);
+                        // Only add if we haven't modified this index
+                        if (data.find(idx) == data.end()) {
+                            int value = stoi(line.substr(end_bracket + 1));
+                            data[idx].insert(value);
+                        }
+                    }
                 }
             }
             fin.close();
         }
         
-        // Add modified entries
-        for (auto& p : modified) {
-            all_data[p.first] = p.second;
-        }
-        
-        // Write back
-        ofstream fout(DATA_FILE);
-        for (auto& p : all_data) {
-            for (int v : p.second) {
-                fout << p.first << " " << v << "\n";
-            }
-        }
-        fout.close();
+        write_bucket(bucket, data);
     }
     
     return 0;
