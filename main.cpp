@@ -1,34 +1,38 @@
 #include <iostream>
 #include <fstream>
-#include <string>
-#include <vector>
+#include <cstdio>
+#include <cstring>
 #include <algorithm>
-#include <climits>
+#include <vector>
 #include <sys/stat.h>
 
 using namespace std;
 
+const int MAX_INDEX_LEN = 65;
 const string DATA_FILE = "kvstore.dat";
+
+// Fixed-size index for memory efficiency
+struct Entry {
+    char index[MAX_INDEX_LEN];
+    int value;
+    
+    bool operator<(const Entry& other) const {
+        int cmp = strcmp(index, other.index);
+        if (cmp != 0) return cmp < 0;
+        return value < other.value;
+    }
+    
+    bool operator==(const Entry& other) const {
+        return strcmp(index, other.index) == 0 && value == other.value;
+    }
+};
+
+vector<Entry> entries;
 
 bool file_exists(const string& filename) {
     struct stat buffer;
     return (stat(filename.c_str(), &buffer) == 0);
 }
-
-// Compact storage: sort by index, then by value
-struct Entry {
-    string index;
-    int value;
-    bool operator<(const Entry& other) const {
-        if (index != other.index) return index < other.index;
-        return value < other.value;
-    }
-    bool operator==(const Entry& other) const {
-        return index == other.index && value == other.value;
-    }
-};
-
-vector<Entry> entries;
 
 int main() {
     ios_base::sync_with_stdio(false);
@@ -36,72 +40,78 @@ int main() {
     
     // Read existing entries
     if (file_exists(DATA_FILE)) {
-        ifstream fin(DATA_FILE);
-        string index;
+        FILE* fin = fopen(DATA_FILE.c_str(), "r");
+        char index[MAX_INDEX_LEN];
         int value;
-        while (fin >> index >> value) {
-            entries.push_back({index, value});
+        while (fscanf(fin, "%64s %d", index, &value) == 2) {
+            Entry e;
+            strcpy(e.index, index);
+            e.value = value;
+            entries.push_back(e);
         }
-        fin.close();
+        fclose(fin);
     }
     
     // Sort for binary search
     sort(entries.begin(), entries.end());
     
     int n;
-    cin >> n;
+    scanf("%d", &n);
+    
+    char cmd[10];
+    char index[MAX_INDEX_LEN];
+    int value;
     
     for (int i = 0; i < n; i++) {
-        string cmd;
-        cin >> cmd;
+        scanf("%s", cmd);
         
-        if (cmd == "insert") {
-            string index;
-            int value;
-            cin >> index >> value;
-            // Check if already exists
-            auto it = lower_bound(entries.begin(), entries.end(), Entry{index, value});
-            if (it == entries.end() || !(it->index == index && it->value == value)) {
-                entries.insert(it, {index, value});
+        if (cmd[0] == 'i') { // insert
+            scanf("%s %d", index, &value);
+            Entry target;
+            strcpy(target.index, index);
+            target.value = value;
+            auto it = lower_bound(entries.begin(), entries.end(), target);
+            if (it == entries.end() || strcmp(it->index, index) != 0 || it->value != value) {
+                entries.insert(it, target);
             }
-        } else if (cmd == "delete") {
-            string index;
-            int value;
-            cin >> index >> value;
-            auto it = lower_bound(entries.begin(), entries.end(), Entry{index, value});
-            if (it != entries.end() && it->index == index && it->value == value) {
+        } else if (cmd[0] == 'd') { // delete
+            scanf("%s %d", index, &value);
+            Entry target;
+            strcpy(target.index, index);
+            target.value = value;
+            auto it = lower_bound(entries.begin(), entries.end(), target);
+            if (it != entries.end() && strcmp(it->index, index) == 0 && it->value == value) {
                 entries.erase(it);
             }
-        } else if (cmd == "find") {
-            string index;
-            cin >> index;
+        } else { // find
+            scanf("%s", index);
+            Entry target;
+            strcpy(target.index, index);
+            target.value = -2147483647; // INT_MIN equivalent
             
-            auto lower = lower_bound(entries.begin(), entries.end(), Entry{index, INT_MIN});
+            auto lower = lower_bound(entries.begin(), entries.end(), target);
             
-            // Collect matching values
-            vector<int> values;
-            for (auto it = lower; it != entries.end() && it->index == index; ++it) {
-                values.push_back(it->value);
+            // Collect and output matching values
+            bool first = true;
+            for (auto it = lower; it != entries.end() && strcmp(it->index, index) == 0; ++it) {
+                if (!first) putchar(' ');
+                printf("%d", it->value);
+                first = false;
             }
-            
-            if (values.empty()) {
-                cout << "null\n";
+            if (first) {
+                puts("null");
             } else {
-                for (size_t j = 0; j < values.size(); j++) {
-                    if (j > 0) cout << " ";
-                    cout << values[j];
-                }
-                cout << "\n";
+                putchar('\n');
             }
         }
     }
     
     // Save entries
-    ofstream fout(DATA_FILE);
+    FILE* fout = fopen(DATA_FILE.c_str(), "w");
     for (auto& e : entries) {
-        fout << e.index << " " << e.value << "\n";
+        fprintf(fout, "%s %d\n", e.index, e.value);
     }
-    fout.close();
+    fclose(fout);
     
     return 0;
 }
